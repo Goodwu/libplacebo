@@ -272,6 +272,7 @@ struct img {
     struct pl_color_repr repr;
     struct pl_color_space color;
     int comps;
+    bool dovi_decode_linear; // decoded to linear RGB in SDR-white units
 };
 
 // Plane 'type', ordered by incrementing priority
@@ -1547,6 +1548,60 @@ static bool want_merge(struct pass_state *pass,
 }
 
 // This scales and merges all of the source images, and initializes pass->img.
+static bool dovi_linear_decode_candidate(struct pass_state *pass)
+{
+    if (!pass->params->optimize_dovi_linear_decode)
+        return false;
+
+    const struct pl_frame *image = &pass->image;
+    const struct pl_frame *target = &pass->target;
+    const struct pl_render_params *params = pass->params;
+    const struct img *img = &pass->img;
+
+    // Only use the direct downscaling path with no intermediate color work.
+    if (image->repr.sys != PL_COLOR_SYSTEM_DOLBYVISION ||
+        image->repr.alpha != PL_ALPHA_NONE ||
+        image->color.transfer != PL_COLOR_TRC_PQ ||
+        image->field != PL_FIELD_NONE ||
+        params->num_hooks || params->lut || image->lut || target->lut ||
+        image->icc || target->icc || params->cone_params)
+        return false;
+
+    const struct pl_color_adjustment *adj = params->color_adjustment;
+    if (adj && (adj->brightness != 0 || adj->contrast != 1 ||
+                adj->saturation != 1 || adj->hue != 0 || adj->gamma != 1 ||
+                adj->temperature != 0))
+        return false;
+
+    if (params->color_map_params &&
+        params->color_map_params->contrast_recovery != 0)
+        return false;
+
+    // hdr_update_peak() must be guaranteed to return before inspecting pixels.
+    if (params->peak_detect_params &&
+        pass->rr->gpu->limits.max_ssbo_size && !image->color.hdr.avg_pq_y)
+        return false;
+
+    int dst_w = abs(pl_rect_w(pass->dst_rect));
+    int dst_h = abs(pl_rect_h(pass->dst_rect));
+    if (!dst_w || !dst_h)
+        return false;
+
+    int out_w, out_h;
+    if (img->sh && pl_shader_output_size(img->sh, &out_w, &out_h) &&
+        (out_w != dst_w || out_h != dst_h))
+        return false;
+
+    struct pl_sample_src src = {
+        .components = img->comps,
+        .new_w = dst_w,
+        .new_h = dst_h,
+        .rect = img->rect,
+    };
+    struct sampler_info info = sample_src_info(pass, &src, SAMPLER_MAIN);
+    return info.type == SAMPLER_DIRECT && info.dir == SAMPLER_DOWN;
+}
+
 static bool pass_read_image(struct pass_state *pass)
 {
     const struct pl_render_params *params = pass->params;
@@ -1936,7 +1991,13 @@ static bool pass_read_image(struct pass_state *pass)
             pl_shader_linearize(sh, &pass->img.color);
             pass->img.color.transfer = PL_COLOR_TRC_LINEAR;
         }
-        pl_shader_decode_color(sh, &pass->img.repr, params->color_adjustment);
+        if (dovi_linear_decode_candidate(pass)) {
+            pl_shader_decode_color_linear_dovi(sh, &pass->img.repr);
+            pass->img.dovi_decode_linear = true;
+        } else
+        {
+            pl_shader_decode_color(sh, &pass->img.repr, params->color_adjustment);
+        }
     }
 
     if (lut_type == PL_LUT_NORMALIZED)
@@ -2012,6 +2073,17 @@ static bool pass_scale_main(struct pass_state *pass)
                 use_sigmoid = true;
         }
     }
+
+    // The decode decision is made in pass_read_image. If renderer state
+    // unexpectedly changed before scaling, return to the original PQ
+    // representation before entering any other scaler branch.
+    if (img->dovi_decode_linear &&
+        !(info.type == SAMPLER_DIRECT && info.dir == SAMPLER_DOWN && !need_fbo))
+    {
+        pl_shader_delinearize(img_sh(pass, img), &img->color);
+        img->dovi_decode_linear = false;
+    }
+
 
     if (info.dir == SAMPLER_NOOP && !need_fbo) {
         pl_assert(src.new_w == img->w && src.new_h == img->h);
@@ -2161,7 +2233,7 @@ static void pass_convert_colors(struct pass_state *pass)
     struct img *img = &pass->img;
     pl_shader sh = img_sh(pass, img);
 
-    bool prelinearized = false;
+    bool prelinearized = img->dovi_decode_linear;
     bool need_conversion = true;
     assert(image->color.primaries == img->color.primaries);
     if (img->color.transfer == PL_COLOR_TRC_LINEAR) {

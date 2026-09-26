@@ -313,6 +313,12 @@ struct pl_render_params {
     // ringing, but it shouldn't normally be necessary.
     bool disable_linear_scaling;
 
+    // Allow Dolby Vision/PQ sources to be decoded directly into linear RGB
+    // when the renderer can pass that value straight to color mapping. This
+    // avoids an intermediate PQ encode/decode pair. Unsupported render paths
+    // keep using the regular color decoding path.
+    bool optimize_dovi_linear_decode;
+
     // Forces the use of the "general" scaling algorithms even when using the
     // special-cased built-in presets like `pl_filter_bicubic`. Basically, this
     // disables the more efficient implementations in favor of the slower,

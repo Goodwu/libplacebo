@@ -27,6 +27,13 @@
 
 #include <libplacebo/shaders.h>
 
+struct pl_color_repr;
+
+// Internal renderer fast path: decode Dolby Vision directly to PQ-linear RGB
+// normalized to PL_COLOR_SDR_WHITE. The caller must preserve source color
+// metadata and pass prelinearized=true to pl_shader_color_map_ex.
+void pl_shader_decode_color_linear_dovi(pl_shader sh, struct pl_color_repr *repr);
+
 // This represents an identifier (e.g. name of function, uniform etc.) for
 // a shader resource. Not human-readable.
 

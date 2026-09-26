@@ -272,8 +272,9 @@ void pl_shader_dovi_reshape(pl_shader sh, const struct pl_dovi_metadata *data)
 #endif
 }
 
-void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
-                            const struct pl_color_adjustment *params)
+static void decode_color_impl(pl_shader sh, struct pl_color_repr *repr,
+                              const struct pl_color_adjustment *params,
+                              bool linear_dovi)
 {
     if (!sh_require(sh, PL_SHADER_SIG_COLOR, 0, 0))
         return;
@@ -413,12 +414,21 @@ void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
              PQ_M2, PQ_C1, PQ_C2, PQ_C3, PQ_M1);
         // LMS matrix
         GLSL("color.rgb = "$" * color.rgb; \n", mat);
-        // PQ OETF
-        GLSL("color.rgb = pow(max(color.rgb, 0.0), vec3(%f));       \n"
-             "color.rgb = (vec3(%f) + vec3(%f) * color.rgb)         \n"
-             "             / (vec3(1.0) + vec3(%f) * color.rgb);    \n"
-             "color.rgb = pow(color.rgb, vec3(%f));                 \n",
-             PQ_M1, PQ_C1, PQ_C2, PQ_C3, PQ_M2);
+        if (linear_dovi) {
+            // The renderer passes this directly to color_map with
+            // prelinearized=true. Match PQ linearize's negative clamp and
+            // 10000-nit to SDR-white normalization after the LMS matrix.
+            GLSL("// DOVI_LINEAR_RGB \n"
+                 "color.rgb = max(color.rgb, 0.0); \n"
+                 "color.rgb *= vec3(%f); \n", 10000.0 / PL_COLOR_SDR_WHITE);
+        } else {
+            // PQ OETF
+            GLSL("color.rgb = pow(max(color.rgb, 0.0), vec3(%f));       \n"
+                 "color.rgb = (vec3(%f) + vec3(%f) * color.rgb)         \n"
+                 "             / (vec3(1.0) + vec3(%f) * color.rgb);    \n"
+                 "color.rgb = pow(color.rgb, vec3(%f));                 \n",
+                 PQ_M1, PQ_C1, PQ_C2, PQ_C3, PQ_M2);
+        }
         break;
 #else
         SH_FAIL(sh, "libplacebo was compiled without support for dolbyvision reshaping");
@@ -457,6 +467,19 @@ void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
 
     pl_shader_set_alpha(sh, repr, PL_ALPHA_INDEPENDENT);
     GLSL("}\n");
+}
+
+void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
+                            const struct pl_color_adjustment *params)
+{
+    decode_color_impl(sh, repr, params, false);
+}
+
+void pl_shader_decode_color_linear_dovi(pl_shader sh, struct pl_color_repr *repr)
+{
+    pl_assert(repr->sys == PL_COLOR_SYSTEM_DOLBYVISION);
+    pl_assert(repr->alpha == PL_ALPHA_NONE);
+    decode_color_impl(sh, repr, NULL, true);
 }
 
 void pl_shader_encode_color(pl_shader sh, const struct pl_color_repr *repr)
@@ -1754,7 +1777,10 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
 
     pl_fmt gamut_fmt = pl_find_fmt(SH_GPU(sh), PL_FMT_UNORM, 4, 16, 16, PL_FMT_CAP_LINEAR);
     if (!gamut_fmt) {
-        gamut.function = &pl_gamut_map_saturation;
+        // Honor an explicit clip choice when the 3D LUT format is unavailable.
+        // Other modes retain the historical saturation fallback.
+        if (gamut.function != &pl_gamut_map_clip)
+            gamut.function = &pl_gamut_map_saturation;
         can_fast = true;
     }
 
