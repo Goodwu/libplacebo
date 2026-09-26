@@ -201,6 +201,10 @@ struct pl_opengl_wrap_params {
 
     // The texture's GLint sized internal format (e.g. GL_RGBA16F). Required.
     int iformat;
+
+    // Select GL_EXT_YUV_target raw Y/Cb/Cr sampling for an external texture.
+    // The default PL_SAMPLER_NORMAL keeps target-based sampler inference.
+    enum pl_sampler_type sampler_type;
 };
 
 #define pl_opengl_wrap_params(...) (&(struct pl_opengl_wrap_params) { __VA_ARGS__ })

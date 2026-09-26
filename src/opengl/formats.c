@@ -77,6 +77,17 @@ const struct gl_format formats_norm8[] = {
     {GL_RGBA8,          RGBA,  U8,  FMT("rgba8",    8, UNORM, S|L|F|V)},
 };
 
+// GLES3 packed normalized color target for external YUV conversion.
+const struct gl_format formats_packed10[] = {
+    {GL_RGB10_A2, RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, {
+        .name = "rgb10_a2",
+        .type = PL_FMT_UNORM,
+        .caps = S|L|F,
+        .sample_order = {0, 1, 2, 3},
+        .component_depth = {10, 10, 10, 2},
+    }},
+};
+
 // Signed variants
 /* TODO: these are broken in mesa
 const struct gl_format formats_snorm8[] = {
@@ -130,6 +141,19 @@ const struct gl_format formats_float32[] = {
     {GL_R32F,           R,     FLT, FMT("r32f",    32, FLOAT, S|L|F|V)},
     {GL_RG32F,          RG,    FLT, FMT("rg32f",   32, FLOAT, S|L|F|V)},
     {GL_RGB32F,         RGB,   FLT, FMT("rgb32f",  32, FLOAT, S|L|F|V)},
+    {GL_RGBA32F,        RGBA,  FLT, FMT("rgba32f", 32, FLOAT, S|L|F|V)},
+};
+
+// GLES does not make RGB32F color-renderable, and float32 linear filtering
+// requires a separate extension. Keep the usable color-buffer formats distinct.
+const struct gl_format formats_float32_gles[] = {
+    {GL_R32F,           R,     FLT, FMT("r32f",    32, FLOAT, S|F|V)},
+    {GL_RG32F,          RG,    FLT, FMT("rg32f",   32, FLOAT, S|F|V)},
+    {GL_RGBA32F,        RGBA,  FLT, FMT("rgba32f", 32, FLOAT, S|F|V)},
+};
+const struct gl_format formats_float32_gles_linear[] = {
+    {GL_R32F,           R,     FLT, FMT("r32f",    32, FLOAT, S|L|F|V)},
+    {GL_RG32F,          RG,    FLT, FMT("rg32f",   32, FLOAT, S|L|F|V)},
     {GL_RGBA32F,        RGBA,  FLT, FMT("rgba32f", 32, FLOAT, S|L|F|V)},
 };
 
@@ -284,6 +308,7 @@ static void add_format(pl_gpu pgpu, const struct gl_format *gl_fmt)
         break;
     case GL_INT:
     case GL_UNSIGNED_INT:
+    case GL_UNSIGNED_INT_2_10_10_10_REV:
     case GL_FLOAT:
         size = 4;
         break;
@@ -292,10 +317,11 @@ static void add_format(pl_gpu pgpu, const struct gl_format *gl_fmt)
     }
 
     // Host visible representation
-    fmt->texel_size = fmt->num_components * size;
+    bool packed10 = gl_fmt->type == GL_UNSIGNED_INT_2_10_10_10_REV;
+    fmt->texel_size = packed10 ? 4 : fmt->num_components * size;
     fmt->texel_align = 1;
     for (int i = 0; i < fmt->num_components; i++)
-        fmt->host_bits[i] = size * 8;
+        fmt->host_bits[i] = packed10 ? fmt->component_depth[i] : size * 8;
 
     // Compute internal size by summing up the depth
     int ibits = 0;
@@ -486,6 +512,7 @@ bool gl_setup_formats(struct pl_gpu_t *gpu)
         // GLES 3.0 has some basic formats, with framebuffers for float16
         // depending on GL_EXT_color_buffer_(half_)float support
         DO_FORMATS(formats_norm8);
+        DO_FORMATS(formats_packed10);
         if (pl_opengl_has_ext(p->gl, "GL_EXT_texture_norm16")) {
             DO_FORMATS(formats_norm16);
             DO_FORMATS(formats_rgb16_fallback);
@@ -493,7 +520,14 @@ bool gl_setup_formats(struct pl_gpu_t *gpu)
         if (pl_opengl_has_ext(p->gl, "GL_EXT_texture_format_BGRA8888"))
             DO_FORMATS(formats_bgra_gles);
         DO_FORMATS(formats_uint);
-        DO_FORMATS(formats_basic_vertex);
+        if (pl_opengl_has_ext(p->gl, "GL_EXT_color_buffer_float")) {
+            if (pl_opengl_has_ext(p->gl, "GL_OES_texture_float_linear"))
+                DO_FORMATS(formats_float32_gles_linear);
+            else
+                DO_FORMATS(formats_float32_gles);
+        } else {
+            DO_FORMATS(formats_basic_vertex);
+        }
         if (p->gles_ver >= 32 || pl_opengl_has_ext(p->gl, "GL_EXT_color_buffer_float")) {
             DO_FORMATS(formats_float16_fbo);
         } else {

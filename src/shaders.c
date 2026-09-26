@@ -642,6 +642,7 @@ static const char *samplers2D[] = {
     [PL_SAMPLER_NORMAL]     = "sampler2D",
     [PL_SAMPLER_RECT]       = "sampler2DRect",
     [PL_SAMPLER_EXTERNAL]   = "samplerExternalOES",
+    [PL_SAMPLER_EXTERNAL_YUV] = "highp __samplerExternal2DY2YEXT",
 };
 
 ident_t sh_subpass(pl_shader sh, pl_shader sub)
