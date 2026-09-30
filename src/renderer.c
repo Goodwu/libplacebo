@@ -1546,6 +1546,44 @@ static bool want_merge(struct pass_state *pass,
     return false;
 }
 
+// Decoding Dolby Vision IPT directly into linear light RGB skips the
+// redundant PQ encode/decode pair, but is only legal if nothing else in the
+// pipeline depends on seeing the intermediate PQ-encoded representation.
+// Everything else (scaling, hooks, tone mapping etc.) operates on the
+// `PL_COLOR_TRC_LINEAR` intermediate state, which the renderer already
+// supports (cf. the XYZ decoding path).
+static bool can_decode_dovi_linear(const struct pass_state *pass)
+{
+    const struct pl_frame *image = &pass->image;
+    const struct pl_render_params *params = pass->params;
+
+    if (params->disable_dovi_linear_decode)
+        return false;
+
+    if (image->repr.sys != PL_COLOR_SYSTEM_DOLBYVISION ||
+        image->repr.alpha != PL_ALPHA_NONE ||     // linear decode skips alpha
+        image->color.transfer != PL_COLOR_TRC_PQ) // PQ normalization required
+    {
+        return false;
+    }
+
+    if (image->lut || image->icc)
+        return false; // applied to the non-linear representation
+
+    for (int i = 0; i < params->num_hooks; i++) {
+        if (params->hooks[i]->stages & (PL_HOOK_NATIVE | PL_HOOK_RGB))
+            return false; // may depend on the decoded representation
+    }
+
+    const struct pl_color_adjustment *adj = params->color_adjustment;
+    if (adj && (adj->brightness != 0.0f || adj->contrast != 1.0f ||
+                adj->saturation != 1.0f || adj->hue != 0.0f ||
+                adj->gamma != 1.0f || adj->temperature != 0.0f))
+        return false; // adjustments act on the PQ-encoded representation
+
+    return true;
+}
+
 // This scales and merges all of the source images, and initializes pass->img.
 static bool pass_read_image(struct pass_state *pass)
 {
@@ -1936,7 +1974,13 @@ static bool pass_read_image(struct pass_state *pass)
             pl_shader_linearize(sh, &pass->img.color);
             pass->img.color.transfer = PL_COLOR_TRC_LINEAR;
         }
-        pl_shader_decode_color(sh, &pass->img.repr, params->color_adjustment);
+        if (can_decode_dovi_linear(pass)) {
+            PL_TRACE(rr, "Decoding Dolby Vision directly to linear light");
+            sh_decode_color_dovi_linear(sh, &pass->img.repr);
+            pass->img.color.transfer = PL_COLOR_TRC_LINEAR;
+        } else {
+            pl_shader_decode_color(sh, &pass->img.repr, params->color_adjustment);
+        }
     }
 
     if (lut_type == PL_LUT_NORMALIZED)

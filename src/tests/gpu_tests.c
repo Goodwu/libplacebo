@@ -1591,6 +1591,184 @@ error:
     pl_tex_destroy(gpu, &fbo);
 }
 
+// Tests the equivalence of the Dolby Vision linear decoding fast path
+// (`pl_render_params.disable_dovi_linear_decode`) against the regular
+// decode-to-PQ path, across the various scaling configurations.
+static void pl_dovi_tests(pl_gpu gpu)
+{
+    if (gpu->glsl.version < 300)
+        return;
+
+    printf("pl_dovi_tests:\n");
+
+    enum { width = 64, height = 64 };
+    static float data[height][width][4];
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            for (int c = 0; c < 3; c++)
+                data[y][x][c] = RANDOM;
+            data[y][x][3] = 1.0;
+        }
+    }
+
+    struct pl_plane_data plane_data = {
+        .type = PL_FMT_FLOAT,
+        .width = width,
+        .height = height,
+        .component_size = {8 * sizeof(float), 8 * sizeof(float),
+                           8 * sizeof(float), 8 * sizeof(float)},
+        .component_map  = {0, 1, 2, 3},
+        .pixel_stride = 4 * sizeof(float),
+        .pixels = data,
+    };
+
+    struct pl_plane img_plane = {0};
+    pl_tex img_tex = NULL;
+    pl_renderer rr = NULL;
+    pl_tex fbo = NULL;
+
+    if (!pl_upload_plane(gpu, &img_plane, &img_tex, &plane_data))
+        goto error; // no float texture support
+
+    pl_fmt fbo_fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_RENDERABLE);
+    if (!fbo_fmt)
+        fbo_fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 0, PL_FMT_CAP_RENDERABLE);
+    if (!fbo_fmt)
+        goto error;
+
+    fbo = pl_tex_create(gpu, &(struct pl_tex_params) {
+        .format = fbo_fmt,
+        .w = width,
+        .h = height,
+        .renderable = true,
+        .storable = !!(fbo_fmt->caps & PL_FMT_CAP_STORABLE),
+        .host_readable = true,
+    });
+    REQUIRE(fbo);
+
+    struct pl_frame image = {
+        .num_planes = 1,
+        .planes = { img_plane },
+        .repr = {
+            .sys = PL_COLOR_SYSTEM_DOLBYVISION,
+            .levels = PL_COLOR_LEVELS_FULL,
+            .alpha = PL_ALPHA_NONE,
+            .dovi = &dovi_meta,
+        },
+        .color = {
+            .primaries = PL_COLOR_PRIM_BT_2020,
+            .transfer = PL_COLOR_TRC_PQ,
+            .hdr = {
+                // Model the L1 metadata Dolby Vision streams carry. This also
+                // keeps peak detection behavior identical with and without
+                // the linear decoding fast path.
+                .min_luma = 0.005,
+                .max_luma = 1000,
+                .avg_pq_y = 0.3,
+            },
+        },
+    };
+
+    struct pl_frame target = {
+        .num_planes = 1,
+        .planes = {{
+            .texture = fbo,
+            .components = 4,
+            .component_mapping = {0, 1, 2, 3},
+        }},
+        .repr = {
+            .sys = PL_COLOR_SYSTEM_RGB,
+            .levels = PL_COLOR_LEVELS_FULL,
+            .bits = { .color_depth = 32 }, // avoid quantization/dithering
+        },
+        .color = pl_color_space_srgb,
+    };
+
+    rr = pl_renderer_create(gpu->log, gpu);
+    REQUIRE(rr);
+
+    static float ref[height][width][4], out[height][width][4];
+    struct pl_color_map_params no_cr = pl_color_map_default_params;
+    no_cr.contrast_recovery = 0.0f;
+
+    // Render each configuration twice, with the fast path enabled (default)
+    // and disabled, and require both outputs to match. Intermediate FBOs are
+    // only 16-bit on many GPUs, so the scaled cases pick up some extra
+    // rounding along the way.
+#define TEST_DOVI(eps, desc)                                                   \
+    do {                                                                       \
+        printf("- testing dovi linear decode: %s\n", desc);                    \
+        struct pl_render_params off = sparams;                                 \
+        off.disable_dovi_linear_decode = true;                                 \
+        REQUIRE(pl_render_image(rr, &image, &target, &off));                   \
+        REQUIRE(pl_renderer_get_errors(rr).errors == PL_RENDER_ERR_NONE);      \
+        REQUIRE(pl_tex_download(gpu, &(struct pl_tex_transfer_params) {        \
+            .tex = fbo,                                                        \
+            .ptr = ref,                                                        \
+        }));                                                                   \
+        REQUIRE(pl_render_image(rr, &image, &target, &sparams));               \
+        REQUIRE(pl_renderer_get_errors(rr).errors == PL_RENDER_ERR_NONE);      \
+        REQUIRE(pl_tex_download(gpu, &(struct pl_tex_transfer_params) {        \
+            .tex = fbo,                                                        \
+            .ptr = out,                                                        \
+        }));                                                                   \
+        for (int y = 0; y < height; y++) {                                     \
+            for (int x = 0; x < width; x++) {                                  \
+                for (int c = 0; c < 3; c++)                                    \
+                    REQUIRE_FEQ(out[y][x][c], ref[y][x][c], eps);              \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+    // A 1:1 render into a BT.2020 linear target involves no tone or gamut
+    // mapping, so the only difference between the two paths is the redundant
+    // PQ encode/decode pair, which round-trips to within ~1e-4 relative error
+    // in float32. (The linear decoding path is the more accurate of the two.)
+    struct pl_render_params sparams = pl_render_default_params;
+    sparams.color_map_params = &no_cr;
+    target.color = (struct pl_color_space) {
+        .primaries = PL_COLOR_PRIM_BT_2020,
+        .transfer = PL_COLOR_TRC_LINEAR,
+        .hdr = { .min_luma = 0.005, .max_luma = 1000 },
+    };
+    TEST_DOVI(1e-3, "1:1 (no tone mapping)");
+    target.color = pl_color_space_srgb;
+
+    // The remaining cases add tone mapping (which amplifies the rounding
+    // noise near black) and/or 16-bit float intermediate FBOs (which are
+    // quantized differently for linear light vs. PQ data).
+    sparams = pl_render_default_params;
+    TEST_DOVI(5e-3, "1:1");
+
+    target.crop.x1 = width / 2.0;
+    target.crop.y1 = height / 2.0;
+    TEST_DOVI(5e-3, "downscale (hermite)");
+    sparams.downscaler = NULL;
+    TEST_DOVI(5e-3, "downscale (direct)");
+    sparams = pl_render_default_params;
+
+    image.crop.x1 = width / 2.0;
+    image.crop.y1 = height / 2.0;
+    TEST_DOVI(5e-3, "upscale (lanczos)");
+    image.crop.x1 = image.crop.y1 = 0;
+
+    sparams.color_map_params = &no_cr;
+    TEST_DOVI(5e-3, "downscale (no contrast recovery)");
+    sparams = pl_render_default_params;
+
+    sparams = pl_render_high_quality_params;
+    sparams.deband_params = NULL; // grain is seeded per-frame, not comparable
+    TEST_DOVI(5e-3, "downscale (high quality)");
+    sparams = pl_render_default_params;
+
+#undef TEST_DOVI
+
+error:
+    pl_renderer_destroy(&rr);
+    pl_tex_destroy(gpu, &img_tex);
+    pl_tex_destroy(gpu, &fbo);
+}
+
 static struct pl_hook_res noop_hook(void *priv, const struct pl_hook_params *params)
 {
     return (struct pl_hook_res) {0};
@@ -1842,6 +2020,7 @@ void gpu_shader_tests(pl_gpu gpu)
     pl_shader_tests(gpu);
     pl_scaler_tests(gpu);
     pl_render_tests(gpu);
+    pl_dovi_tests(gpu);
     pl_ycbcr_tests(gpu);
 
     REQUIRE(!pl_gpu_is_failed(gpu));

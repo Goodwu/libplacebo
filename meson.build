@@ -12,6 +12,7 @@ project('libplacebo', ['c', 'cpp'],
     7,
     # API version
     {
+      '366': 'add pl_render_params.disable_dovi_linear_decode',
       '365': 'add pl_vulkan_queue.flags',
       '364': 'add pl_avdovi_metadata_supported, lift checks out of pl_map_avdovi_metadata, extend pl_avframe_params',
       '363': 'add pl_frame.pixel_aspect_ratio',

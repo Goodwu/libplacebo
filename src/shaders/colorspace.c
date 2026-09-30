@@ -272,8 +272,9 @@ void pl_shader_dovi_reshape(pl_shader sh, const struct pl_dovi_metadata *data)
 #endif
 }
 
-void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
-                            const struct pl_color_adjustment *params)
+static void decode_color_impl(pl_shader sh, struct pl_color_repr *repr,
+                              const struct pl_color_adjustment *params,
+                              bool linear_dovi)
 {
     if (!sh_require(sh, PL_SHADER_SIG_COLOR, 0, 0))
         return;
@@ -413,12 +414,20 @@ void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
              PQ_M2, PQ_C1, PQ_C2, PQ_C3, PQ_M1);
         // LMS matrix
         GLSL("color.rgb = "$" * color.rgb; \n", mat);
-        // PQ OETF
-        GLSL("color.rgb = pow(max(color.rgb, 0.0), vec3(%f));       \n"
-             "color.rgb = (vec3(%f) + vec3(%f) * color.rgb)         \n"
-             "             / (vec3(1.0) + vec3(%f) * color.rgb);    \n"
-             "color.rgb = pow(color.rgb, vec3(%f));                 \n",
-             PQ_M1, PQ_C1, PQ_C2, PQ_C3, PQ_M2);
+        if (linear_dovi) {
+            // Skip the PQ OETF and hand the linear LMS values straight to the
+            // caller, rescaled like `pl_shader_linearize` does for PQ
+            // (10000-nit -> SDR-white units).
+            GLSL("color.rgb = max(color.rgb, 0.0); \n"
+                 "color.rgb *= vec3(%f); \n", 10000.0 / PL_COLOR_SDR_WHITE);
+        } else {
+            // PQ OETF
+            GLSL("color.rgb = pow(max(color.rgb, 0.0), vec3(%f));       \n"
+                 "color.rgb = (vec3(%f) + vec3(%f) * color.rgb)         \n"
+                 "             / (vec3(1.0) + vec3(%f) * color.rgb);    \n"
+                 "color.rgb = pow(color.rgb, vec3(%f));                 \n",
+                 PQ_M1, PQ_C1, PQ_C2, PQ_C3, PQ_M2);
+        }
         break;
 #else
         SH_FAIL(sh, "libplacebo was compiled without support for dolbyvision reshaping");
@@ -457,6 +466,19 @@ void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
 
     pl_shader_set_alpha(sh, repr, PL_ALPHA_INDEPENDENT);
     GLSL("}\n");
+}
+
+void pl_shader_decode_color(pl_shader sh, struct pl_color_repr *repr,
+                            const struct pl_color_adjustment *params)
+{
+    decode_color_impl(sh, repr, params, false);
+}
+
+void sh_decode_color_dovi_linear(pl_shader sh, struct pl_color_repr *repr)
+{
+    pl_assert(repr->sys == PL_COLOR_SYSTEM_DOLBYVISION);
+    pl_assert(repr->alpha == PL_ALPHA_NONE);
+    decode_color_impl(sh, repr, NULL, true);
 }
 
 void pl_shader_encode_color(pl_shader sh, const struct pl_color_repr *repr)

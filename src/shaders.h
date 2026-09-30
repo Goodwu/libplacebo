@@ -27,6 +27,15 @@
 
 #include <libplacebo/shaders.h>
 
+struct pl_color_repr;
+
+// Decode Dolby Vision directly into linear light RGB, normalized such that
+// PL_COLOR_SDR_WHITE corresponds to 1.0 (matching `pl_shader_linearize` on
+// PQ). The caller must mark the resulting color space as
+// PL_COLOR_TRC_LINEAR, and must not combine this with a non-neutral
+// `pl_color_adjustment`.
+void sh_decode_color_dovi_linear(pl_shader sh, struct pl_color_repr *repr);
+
 // This represents an identifier (e.g. name of function, uniform etc.) for
 // a shader resource. Not human-readable.
 

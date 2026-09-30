@@ -313,6 +313,13 @@ struct pl_render_params {
     // ringing, but it shouldn't normally be necessary.
     bool disable_linear_scaling;
 
+    // Disables the optimization in which Dolby Vision sources are decoded
+    // directly into linear light RGB, skipping the redundant intermediate PQ
+    // encode/decode pair. This is a mathematically equivalent transformation
+    // (results differ only by floating point rounding), so it is enabled by
+    // default; this switch mainly exists for debugging and testing.
+    bool disable_dovi_linear_decode;
+
     // Forces the use of the "general" scaling algorithms even when using the
     // special-cased built-in presets like `pl_filter_bicubic`. Basically, this
     // disables the more efficient implementations in favor of the slower,
