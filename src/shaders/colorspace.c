@@ -1754,7 +1754,10 @@ void pl_shader_color_map_ex(pl_shader sh, const struct pl_color_map_params *para
 
     pl_fmt gamut_fmt = pl_find_fmt(SH_GPU(sh), PL_FMT_UNORM, 4, 16, 16, PL_FMT_CAP_LINEAR);
     if (!gamut_fmt) {
-        gamut.function = &pl_gamut_map_saturation;
+        // Honor an explicit clip choice when the 3D LUT format is unavailable.
+        // Other modes retain the historical saturation fallback.
+        if (gamut.function != &pl_gamut_map_clip)
+            gamut.function = &pl_gamut_map_saturation;
         can_fast = true;
     }
 
