@@ -323,7 +323,8 @@ static void generate_shaders(pl_dispatch dp,
 
     // Enable all extensions needed for different types of input
     bool has_ssbo = false, has_ubo = false, has_img = false, has_texel = false,
-         has_ext = false, has_nofmt = false, has_gather = false;
+         has_ext = false, has_ext_yuv = false, has_nofmt = false,
+         has_gather = false;
     for (int i = 0; i < sh->descs.num; i++) {
         switch (sh->descs.elem[i].desc.type) {
         case PL_DESC_BUF_UNIFORM: has_ubo = true; break;
@@ -348,6 +349,7 @@ static void generate_shaders(pl_dispatch dp,
             case PL_SAMPLER_NORMAL: break;
             case PL_SAMPLER_RECT: break;
             case PL_SAMPLER_EXTERNAL: has_ext = true; break;
+            case PL_SAMPLER_EXTERNAL_YUV: has_ext_yuv = true; break;
             case PL_SAMPLER_TYPE_COUNT: pl_unreachable();
             }
             break;
@@ -374,6 +376,8 @@ static void generate_shaders(pl_dispatch dp,
             ADD(pre, "#extension GL_OES_EGL_image_external : enable\n");
         }
     }
+    if (has_ext_yuv)
+        ADD(pre, "#extension GL_EXT_YUV_target : require\n");
     if (has_nofmt)
         ADD(pre, "#extension GL_EXT_shader_image_load_formatted : enable\n");
     if (has_gather && !gpu->glsl.gles)
@@ -393,6 +397,10 @@ static void generate_shaders(pl_dispatch dp,
             ADD(pre, "precision mediump sampler1D; \n");
         if (gpu->limits.max_tex_3d_dim && gpu->glsl.version > 100)
             ADD(pre, "precision mediump sampler3D; \n");
+
+        // Raw Y/Cb/Cr samplers benefit from full precision
+        if (has_ext_yuv)
+            ADD(pre, "precision highp __samplerExternal2DY2YEXT; \n");
 
         // Integer math has a good chance of caring about precision
         ADD(pre, "precision highp int; \n");
@@ -467,6 +475,7 @@ static void generate_shaders(pl_dispatch dp,
                 [PL_SAMPLER_NORMAL][3]  = "sampler3D",
                 [PL_SAMPLER_RECT][2]    = "sampler2DRect",
                 [PL_SAMPLER_EXTERNAL][2] = "samplerExternalOES",
+                [PL_SAMPLER_EXTERNAL_YUV][2] = "__samplerExternal2DY2YEXT",
             };
 
             pl_tex tex = sd->binding.object;

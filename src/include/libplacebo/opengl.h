@@ -201,6 +201,20 @@ struct pl_opengl_wrap_params {
 
     // The texture's GLint sized internal format (e.g. GL_RGBA16F). Required.
     int iformat;
+
+    // Overrides the sampler type used to sample from this texture. The
+    // default (PL_SAMPLER_NORMAL) infers the sampler type from the texture
+    // `target`, and is usually what you want.
+    //
+    // Setting this to PL_SAMPLER_EXTERNAL_YUV selects raw Y/Cb/Cr sampling
+    // of a GL_TEXTURE_EXTERNAL_OES via GL_EXT_YUV_target (requires GLES 3.0
+    // and the GL_EXT_YUV_target extension; wrapping fails otherwise). In this
+    // mode, the sampler returns the raw, driver-upsampled YUV values of the
+    // underlying external image. This bypasses libplacebo's own chroma
+    // resampling and chroma location handling, and it is the caller's
+    // responsibility to describe the resulting values with an appropriate
+    // `pl_color_repr` (e.g. levels and bit depth).
+    enum pl_sampler_type sampler_type;
 };
 
 #define pl_opengl_wrap_params(...) (&(struct pl_opengl_wrap_params) { __VA_ARGS__ })

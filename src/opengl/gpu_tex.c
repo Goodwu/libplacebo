@@ -718,12 +718,29 @@ pl_tex pl_opengl_wrap(pl_gpu gpu, const struct pl_opengl_wrap_params *params)
                    "`pl_sampler_type`", params->target);
             goto error;
         }
+        if (params->sampler_type != PL_SAMPLER_NORMAL) {
+            if (params->target != GL_TEXTURE_EXTERNAL_OES ||
+                params->sampler_type != PL_SAMPLER_EXTERNAL_YUV)
+            {
+                PL_ERR(gpu, "Unsupported explicit sampler type for texture target");
+                goto error;
+            }
+            if (p->gles_ver < 30 ||
+                !pl_opengl_has_ext(p->gl, "GL_EXT_YUV_target"))
+            {
+                PL_ERR(gpu, "Requested PL_SAMPLER_EXTERNAL_YUV but "
+                       "GL_EXT_YUV_target (GLES 3.0+) is unavailable");
+                goto error;
+            }
+            tex->sampler_type = params->sampler_type;
+        }
     }
 
     // Create optional extra fbo if needed/possible
     bool can_fbo = tex_gl->texture &&
                    (fmt->caps & PL_FMT_CAP_RENDERABLE) &&
                    tex->sampler_type != PL_SAMPLER_EXTERNAL &&
+                   tex->sampler_type != PL_SAMPLER_EXTERNAL_YUV &&
                    dims < 3;
 
     if (can_fbo && !tex_gl->fbo) {

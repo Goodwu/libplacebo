@@ -735,6 +735,9 @@ enum pl_sampler_type {
     PL_SAMPLER_NORMAL,      // gsampler2D, gsampler3D etc.
     PL_SAMPLER_RECT,        // gsampler2DRect
     PL_SAMPLER_EXTERNAL,    // gsamplerExternalOES
+    // __samplerExternal2DY2YEXT: raw, driver-upsampled Y/Cb/Cr values of an
+    // external image (GL_EXT_YUV_target). See `pl_opengl_wrap_params`.
+    PL_SAMPLER_EXTERNAL_YUV,
     PL_SAMPLER_TYPE_COUNT,
 };
 

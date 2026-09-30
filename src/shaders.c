@@ -642,6 +642,7 @@ static const char *samplers2D[] = {
     [PL_SAMPLER_NORMAL]     = "sampler2D",
     [PL_SAMPLER_RECT]       = "sampler2DRect",
     [PL_SAMPLER_EXTERNAL]   = "samplerExternalOES",
+    [PL_SAMPLER_EXTERNAL_YUV] = "__samplerExternal2DY2YEXT",
 };
 
 ident_t sh_subpass(pl_shader sh, pl_shader sub)
@@ -754,6 +755,12 @@ pl_str_builder sh_finalize_internal(pl_shader sh)
 
     if (sh->input == PL_SHADER_SIG_SAMPLER) {
         pl_assert(sh->sampler_prefix);
+        if (sh->sampler_type == PL_SAMPLER_EXTERNAL_YUV) {
+            // GLES samplers default to lowp precision; the raw Y/Cb/Cr
+            // values need more. (No-op on GLSL versions without precision
+            // statements)
+            GLSLP("precision highp __samplerExternal2DY2YEXT; \n");
+        }
         GLSLP("%s "$"(%c%s src_tex, vec2 tex_coord) {\n",
               outsigs[sh->output], sh->name,
               sh->sampler_prefix,
