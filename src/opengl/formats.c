@@ -77,6 +77,19 @@ const struct gl_format formats_norm8[] = {
     {GL_RGBA8,          RGBA,  U8,  FMT("rgba8",    8, UNORM, S|L|F|V)},
 };
 
+// Packed 10-bit UNORM format, named consistently with the Vulkan/D3D11
+// backends (`rgb10a2`). Also usable as render target for the raw Y/Cb/Cr
+// output of GL_EXT_YUV_target external images on GLES.
+const struct gl_format formats_packed10[] = {
+    {GL_RGB10_A2, RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, {
+        .name = "rgb10a2",
+        .type = PL_FMT_UNORM,
+        .caps = S|L|F,
+        .sample_order = {0, 1, 2, 3},
+        .component_depth = {10, 10, 10, 2},
+    }},
+};
+
 // Signed variants
 /* TODO: these are broken in mesa
 const struct gl_format formats_snorm8[] = {
@@ -130,6 +143,23 @@ const struct gl_format formats_float32[] = {
     {GL_R32F,           R,     FLT, FMT("r32f",    32, FLOAT, S|L|F|V)},
     {GL_RG32F,          RG,    FLT, FMT("rg32f",   32, FLOAT, S|L|F|V)},
     {GL_RGB32F,         RGB,   FLT, FMT("rgb32f",  32, FLOAT, S|L|F|V)},
+    {GL_RGBA32F,        RGBA,  FLT, FMT("rgba32f", 32, FLOAT, S|L|F|V)},
+};
+
+// GLES float32 variants: sampling is core in GLES3, linear filtering requires
+// GL_OES_texture_float_linear, and color renderability requires
+// GL_EXT_color_buffer_float (core in GLES 3.2). RGB32F is sampleable and
+// usable as vertex attribute, but never color-renderable on GLES.
+const struct gl_format formats_float32_gles[] = {
+    {GL_R32F,           R,     FLT, FMT("r32f",    32, FLOAT, S|F|V)},
+    {GL_RG32F,          RG,    FLT, FMT("rg32f",   32, FLOAT, S|F|V)},
+    {GL_RGB32F,         RGB,   FLT, FMT("rgb32f",  32, FLOAT, S|V)},
+    {GL_RGBA32F,        RGBA,  FLT, FMT("rgba32f", 32, FLOAT, S|F|V)},
+};
+const struct gl_format formats_float32_gles_linear[] = {
+    {GL_R32F,           R,     FLT, FMT("r32f",    32, FLOAT, S|L|F|V)},
+    {GL_RG32F,          RG,    FLT, FMT("rg32f",   32, FLOAT, S|L|F|V)},
+    {GL_RGB32F,         RGB,   FLT, FMT("rgb32f",  32, FLOAT, S|L|V)},
     {GL_RGBA32F,        RGBA,  FLT, FMT("rgba32f", 32, FLOAT, S|L|F|V)},
 };
 
@@ -284,6 +314,7 @@ static void add_format(pl_gpu pgpu, const struct gl_format *gl_fmt)
         break;
     case GL_INT:
     case GL_UNSIGNED_INT:
+    case GL_UNSIGNED_INT_2_10_10_10_REV:
     case GL_FLOAT:
         size = 4;
         break;
@@ -292,10 +323,11 @@ static void add_format(pl_gpu pgpu, const struct gl_format *gl_fmt)
     }
 
     // Host visible representation
-    fmt->texel_size = fmt->num_components * size;
+    bool packed10 = gl_fmt->type == GL_UNSIGNED_INT_2_10_10_10_REV;
+    fmt->texel_size = packed10 ? 4 : fmt->num_components * size;
     fmt->texel_align = 1;
     for (int i = 0; i < fmt->num_components; i++)
-        fmt->host_bits[i] = size * 8;
+        fmt->host_bits[i] = packed10 ? fmt->component_depth[i] : size * 8;
 
     // Compute internal size by summing up the depth
     int ibits = 0;
@@ -448,6 +480,7 @@ bool gl_setup_formats(struct pl_gpu_t *gpu)
         // Desktop GL3+ has everything
         DO_FORMATS(formats_norm8);
         DO_FORMATS(formats_bgra8);
+        DO_FORMATS(formats_packed10);
         DO_FORMATS(formats_norm16);
         DO_FORMATS(formats_rgb16_fbo);
         DO_FORMATS(formats_float32);
@@ -486,6 +519,7 @@ bool gl_setup_formats(struct pl_gpu_t *gpu)
         // GLES 3.0 has some basic formats, with framebuffers for float16
         // depending on GL_EXT_color_buffer_(half_)float support
         DO_FORMATS(formats_norm8);
+        DO_FORMATS(formats_packed10);
         if (pl_opengl_has_ext(p->gl, "GL_EXT_texture_norm16")) {
             DO_FORMATS(formats_norm16);
             DO_FORMATS(formats_rgb16_fallback);
@@ -493,11 +527,24 @@ bool gl_setup_formats(struct pl_gpu_t *gpu)
         if (pl_opengl_has_ext(p->gl, "GL_EXT_texture_format_BGRA8888"))
             DO_FORMATS(formats_bgra_gles);
         DO_FORMATS(formats_uint);
-        DO_FORMATS(formats_basic_vertex);
-        if (p->gles_ver >= 32 || pl_opengl_has_ext(p->gl, "GL_EXT_color_buffer_float")) {
+        bool float16_fbo = p->gles_ver >= 32 ||
+            pl_opengl_has_ext(p->gl, "GL_EXT_color_buffer_float");
+        if (float16_fbo) {
             DO_FORMATS(formats_float16_fbo);
         } else {
             DO_FORMATS(formats_float16_fallback);
+        }
+        // Register float32 formats only after the float16 formats, so that
+        // `pl_find_fmt` keeps preferring the more compact 16-bit floats for
+        // e.g. intermediate FBOs.
+        if (float16_fbo) {
+            if (pl_opengl_has_ext(p->gl, "GL_OES_texture_float_linear")) {
+                DO_FORMATS(formats_float32_gles_linear);
+            } else {
+                DO_FORMATS(formats_float32_gles);
+            }
+        } else {
+            DO_FORMATS(formats_basic_vertex);
         }
         goto done;
     }

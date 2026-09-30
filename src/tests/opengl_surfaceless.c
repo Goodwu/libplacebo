@@ -220,6 +220,20 @@ int main()
         last_glsl = gpu->glsl;
         last_limits = gpu->limits;
 
+        // The vec3 float vertex format must survive format table setup
+        REQUIRE(pl_find_vertex_fmt(gpu, PL_FMT_FLOAT, 3));
+
+        // Intermediate FBO formats must remain 16-bit float, rather than
+        // being taken over by 32-bit float formats when both are available
+        // (GLES). Also serves as a regression check for the format table
+        // reordering.
+        if (gpu->glsl.gles) {
+            pl_fmt fbofmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 0,
+                                        PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR);
+            if (fbofmt)
+                REQUIRE_CMP(fbofmt->component_depth[0], <=, 16, "d");
+        }
+
         gpu_shader_tests(gpu);
         gpu_interop_tests(gpu);
         opengl_interop_tests(gpu);
