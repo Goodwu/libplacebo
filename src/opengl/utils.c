@@ -56,6 +56,7 @@ void gl_poll_callbacks(pl_gpu gpu)
             PL_ARRAY_REMOVE_AT(p->callbacks, 0);
             gl->DeleteSync(cb.sync);
             p->failed = true;
+        p->error_epoch++;
             gl_check_err(gpu, "gl_poll_callbacks"); // NOTE: will recurse!
             return;
 
@@ -81,6 +82,7 @@ bool gl_check_err(pl_gpu gpu, const char *fun)
         PL_ERR(gpu, "%s: OpenGL error: %s", fun, gl_err_str(error));
         ret = false;
         p->failed = true;
+        p->error_epoch++;
     }
 
     gl_poll_callbacks(gpu);
@@ -155,5 +157,6 @@ bool egl_check_err(pl_gpu gpu, const char *fun)
         PL_ERR(gpu, "%s: EGL error: %s", fun, egl_err_str(error));
         ret = false;
         p->failed = true;
+        p->error_epoch++;
     }
 }

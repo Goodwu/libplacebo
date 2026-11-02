@@ -30,6 +30,16 @@ struct pl_gl {
     pl_opengl gl;
     uint64_t sig; // hash of GL_VERSION, GL_VENDOR, GL_RENDERER
     bool failed;
+    uint64_t error_epoch;
+    bool yuv_compare_caps_ready;
+    size_t yuv_compare_max_ssbo;
+    // Default-off production UV atlas table (see opengl.h). Null = disabled;
+    // a generation counter invalidates cached consumer passes on re-attach.
+    struct pl_opengl_uv_atlas_cache_t *uv_atlas_production;
+    uint64_t uv_atlas_production_generation;
+    // Monotonic count of passes that actually sampled through the table;
+    // the caller verifies it advances on every table-driven frame.
+    uint64_t uv_atlas_table_passes;
 
     // For import/export
     EGLDisplay egl_dpy;
@@ -55,6 +65,18 @@ struct pl_gl {
     bool has_invalidate_tex;
     bool has_vao;
     bool has_queries;
+    // Android opt-in EXT timer bridge; never enabled by default.
+    bool ext_queries;
+    uint64_t timer_epoch;
+    uint64_t timer_issued, timer_resolved, timer_disjoint, timer_dropped;
+    pl_clock_t timer_report_time;
+    void (*timer_gen)(GLsizei, GLuint *);
+    void (*timer_delete)(GLsizei, const GLuint *);
+    void (*timer_begin)(GLenum, GLuint);
+    void (*timer_end)(GLenum);
+    void (*timer_info)(GLenum, GLenum, GLint *);
+    void (*timer_get)(GLuint, GLenum, GLuint *);
+    void (*timer_get64)(GLuint, GLenum, uint64_t *);
     bool has_modifiers;
     bool has_readback;
     bool has_egl_storage;
@@ -77,6 +99,7 @@ static inline bool _make_current(pl_gpu gpu)
     struct pl_gl *p = PL_PRIV(gpu);
     if (!gl_make_current(p->gl)) {
         p->failed = true;
+        p->error_epoch++;
         return false;
     }
 
@@ -92,7 +115,31 @@ static inline void _release_current(pl_gpu gpu)
 #define MAKE_CURRENT() _make_current(gpu)
 #define RELEASE_CURRENT() _release_current(gpu)
 
+struct gl_yuv_compare {
+    struct pl_yuv_compare dispatch;
+    struct pl_opengl_yuv_compare_params params;
+    struct pl_opengl_yuv_compare_result result;
+    GLsync fence;
+    uint64_t finish_epoch;
+    size_t storage_words;
+    bool last_baseline_ok;
+    EGLDisplay owner_display;
+    EGLContext owner_context;
+    EGLSurface owner_draw, owner_read;
+    char *candidate_source, *baseline_source, *vertex_source;
+    char *original_body, *tap_body, *candidate_vertex_source;
+    struct pl_opengl_yuv_compare_quad_layout quad_layout;
+    uint8_t *quad_baseline_data, *quad_candidate_data;
+    bool quad_recorded;
+    bool consumed, finished, invalidated;
+};
 struct pl_tex_gl {
+    struct gl_yuv_compare *compare;
+    struct pl_opengl_uv_atlas_anchor_t *atlas_anchor;
+    struct pl_opengl_uv_atlas_read_t *atlas_read_owner;
+    struct pl_opengl_uv_atlas_anchor_t *atlas_input_anchor;
+    bool rgb16f_to_yuv;
+    uint64_t yuv_successful_draws;
     GLenum target;
     GLuint texture;
     bool wrapped_tex;
@@ -140,3 +187,7 @@ int gl_desc_namespace(pl_gpu, enum pl_desc_type type);
 pl_pass gl_pass_create(pl_gpu, const struct pl_pass_params *);
 void gl_pass_destroy(pl_gpu, pl_pass);
 void gl_pass_run(pl_gpu, const struct pl_pass_run_params *);
+
+struct pl_yuv_compare *gl_tex_yuv_compare(pl_gpu gpu, pl_tex tex);
+
+struct pl_uv_atlas_anchor *gl_tex_uv_atlas_anchor(pl_gpu gpu, pl_tex tex);

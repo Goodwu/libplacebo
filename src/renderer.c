@@ -3999,6 +3999,12 @@ inter_pass_error:
                                    sample_mode, "frame", NULL, &pos, NULL);
 
         GLSL("color = textureLod("$", "$", 0.0); \n", tex, pos);
+        if (fidx == 1)
+            // The single-frame mixing sample is the production UV table's
+            // rewrite site. This path does not go through
+            // pl_shader_sample_direct, so record the coordinate ident here;
+            // dispatch refuses to fuse untabled without it.
+            sh->sample_uv_ident = pos;
 
         // Usually a no-op. Handles mixed-colorspace frames when
         // preserve_mixing_cache spans target changes. ICC diffs ignored

@@ -215,6 +215,42 @@ static void gl_update_va(pl_gpu gpu, pl_pass pass, size_t vbo_offset)
     }
 }
 
+// GLES has no ShaderStorageBlockBinding entry point. Numeric capture emits
+// layout(binding=N); verify the linked binding instead of calling the desktop
+// remapping API. This path is available only to the explicit diagnostic mode.
+static bool gl_verify_compare_ssbo_binding(pl_gpu gpu, GLuint program,
+                                           const struct pl_desc *desc)
+{
+    struct pl_gl *p = PL_PRIV(gpu);
+    const gl_funcs *gl = gl_funcs_get(gpu);
+    if (!p->yuv_compare_caps_ready || p->gles_ver < 31 || !program ||
+        !desc || !desc->name || desc->binding < 0 ||
+        !gl->GetProgramResourceIndex || !gl->GetProgramResourceiv)
+    {
+        PL_ERR(gpu, "MKS-YUV-COMPARE-LIB event=ssbo-binding-rejected reason=unsupported-query");
+        return false;
+    }
+    uint64_t before = p->error_epoch;
+    GLuint idx = gl->GetProgramResourceIndex(program, GL_SHADER_STORAGE_BLOCK,
+                                             desc->name);
+    GLenum property = GL_BUFFER_BINDING;
+    GLint binding = -1;
+    GLsizei length = 0;
+    if (idx != GL_INVALID_INDEX)
+        gl->GetProgramResourceiv(program, GL_SHADER_STORAGE_BLOCK, idx,
+                                 1, &property, 1, &length, &binding);
+    bool clean = gl_check_err(gpu, "yuv_compare_ssbo_binding");
+    bool ok = idx != GL_INVALID_INDEX && length == 1 && binding == desc->binding &&
+              clean && before == p->error_epoch;
+    if (!ok)
+        PL_ERR(gpu, "MKS-YUV-COMPARE-LIB event=ssbo-binding-rejected block=%s"
+               " index=%u expected=%d actual=%d length=%d clean=%d"
+               " epoch_before=%"PRIu64" epoch_after=%"PRIu64,
+               desc->name, idx, desc->binding, binding, length, clean,
+               before, p->error_epoch);
+    return ok;
+}
+
 pl_pass gl_pass_create(pl_gpu gpu, const struct pl_pass_params *params)
 {
     const gl_funcs *gl = gl_funcs_get(gpu);
@@ -305,10 +341,17 @@ pl_pass gl_pass_create(pl_gpu gpu, const struct pl_pass_params *params)
             break;
         }
         case PL_DESC_BUF_STORAGE: {
-            GLuint idx = gl->GetProgramResourceIndex(pass_gl->program,
-                                                     GL_SHADER_STORAGE_BLOCK,
-                                                     desc->name);
-            gl->ShaderStorageBlockBinding(pass_gl->program, idx, desc->binding);
+            if (p->gles_ver) {
+                if (!gl_verify_compare_ssbo_binding(gpu, pass_gl->program, desc)) {
+                    gl->UseProgram(0);
+                    goto error;
+                }
+            } else {
+                GLuint idx = gl->GetProgramResourceIndex(pass_gl->program,
+                                                         GL_SHADER_STORAGE_BLOCK,
+                                                         desc->name);
+                gl->ShaderStorageBlockBinding(pass_gl->program, idx, desc->binding);
+            }
             break;
         }
         case PL_DESC_BUF_TEXEL_UNIFORM:
@@ -569,6 +612,8 @@ void gl_pass_run(pl_gpu gpu, const struct pl_pass_run_params *params)
     case PL_PASS_RASTER: {
         struct pl_tex_gl *target_gl = PL_PRIV(params->target);
         gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, target_gl->fbo);
+        if (target_gl->rgb16f_to_yuv)
+            gl->Disable(GL_BLEND);
         if (!pass->params.load_target && p->has_invalidate_fb) {
             GLenum fb = target_gl->fbo ? GL_COLOR_ATTACHMENT0 : GL_COLOR;
             gl->InvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, 1, &fb);
@@ -704,5 +749,10 @@ void gl_pass_run(pl_gpu gpu, const struct pl_pass_run_params *params)
 
     gl->UseProgram(0);
     gl_check_err(gpu, "gl_pass_run");
+    if (pass->params.type == PL_PASS_RASTER) {
+        struct pl_tex_gl *target_gl = PL_PRIV(params->target);
+        if (target_gl->rgb16f_to_yuv && !target_gl->compare && !p->failed)
+            target_gl->yuv_successful_draws++;
+    }
     RELEASE_CURRENT();
 }

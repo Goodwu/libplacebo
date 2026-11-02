@@ -100,6 +100,11 @@ struct pl_shader_t {
     bool failed;
     bool mutable;
     ident_t name;
+    // Default-off production UV table (see dispatch.c): the coordinate ident
+    // consumed by the most recent pl_shader_sample_direct call. The generated
+    // final pass rewrites exactly this identifier when a promoted atlas table
+    // is attached, matching the schema10-validated substitution point.
+    ident_t sample_uv_ident;
     enum pl_shader_sig input, output;
     int output_w;
     int output_h;

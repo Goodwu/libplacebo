@@ -281,6 +281,7 @@ bool pl_shader_sample_direct(pl_shader sh, const struct pl_sample_src *src)
     if (!setup_src(sh, src, &tex, &pos, NULL, NULL, NULL, NULL, &scale, true, BEST))
         return false;
 
+    sh->sample_uv_ident = pos;
     GLSL("// pl_shader_sample_direct                                  \n"
          "vec4 color = vec4("$") * vec4(textureLod("$", "$", 0.0));   \n",
          SH_FLOAT(scale), tex, pos);
@@ -295,6 +296,7 @@ bool pl_shader_sample_nearest(pl_shader sh, const struct pl_sample_src *src)
         return false;
 
     sh_describe(sh, "nearest");
+    sh->sample_uv_ident = pos; // single-tap: production UV table rewrite site
     GLSL("// pl_shader_sample_nearest                           \n"
          "vec4 color = vec4("$") * textureLod("$", "$", 0.0);   \n",
          SH_FLOAT(scale), tex, pos);
@@ -309,6 +311,7 @@ bool pl_shader_sample_bilinear(pl_shader sh, const struct pl_sample_src *src)
         return false;
 
     sh_describe(sh, "bilinear");
+    sh->sample_uv_ident = pos; // single-tap: production UV table rewrite site
     GLSL("// pl_shader_sample_bilinear                          \n"
          "vec4 color = vec4("$") * textureLod("$", "$", 0.0);   \n",
          SH_FLOAT(scale), tex, pos);

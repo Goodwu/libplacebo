@@ -33,6 +33,7 @@ struct priv {
     // current parameters
     pl_tex fb;
     bool frame_started;
+    atomic_uintptr_t abort_owner; // only read frame_started after owner matches
 
     // vsync fences
     int swapchain_depth;
@@ -40,6 +41,8 @@ struct priv {
 };
 
 static const struct pl_sw_fns opengl_swapchain;
+// A live thread's TLS address is unique without platform-specific thread IDs.
+static _Thread_local unsigned char abort_thread_token;
 
 pl_swapchain pl_opengl_create_swapchain(pl_opengl pl_gl,
                               const struct pl_opengl_swapchain_params *params)
@@ -60,6 +63,7 @@ pl_swapchain pl_opengl_create_swapchain(pl_opengl pl_gl,
 
     struct priv *p = PL_PRIV(sw);
     pl_mutex_init(&p->lock);
+    atomic_init(&p->abort_owner, 0);
     p->impl = opengl_swapchain;
     p->params = *params;
     p->has_sync = pl_opengl_has_ext(pl_gl, "GL_ARB_sync");
@@ -200,7 +204,12 @@ static bool gl_sw_start_frame(pl_swapchain sw,
     if (!p->frame_started)
         goto error;
 
-    // keep p->lock held
+    // Publish the successful owner while p->lock remains held. Foreign abort
+    // callers read only this atomic and never inspect unprotected frame state.
+    if (p->params.diagnostic_abort_frame_no_gl)
+        atomic_store_explicit(&p->abort_owner, (uintptr_t) &abort_thread_token,
+                              memory_order_release);
+    // keep p->lock held; no GL context lock/count remains for submit or abort
     gl_release_current(p->gl);
     return true;
 
@@ -210,6 +219,34 @@ error:
     return ok;
 }
 
+bool pl_opengl_swapchain_abort_frame_no_gl(pl_swapchain sw)
+{
+    if (!sw)
+        return false;
+    const struct pl_sw_fns *impl = PL_PRIV(sw);
+    if (impl->destroy != opengl_swapchain.destroy)
+        return false;
+    struct priv *p = PL_PRIV(sw);
+    uintptr_t self = (uintptr_t) &abort_thread_token;
+    if (!p->params.diagnostic_abort_frame_no_gl ||
+        atomic_load_explicit(&p->abort_owner, memory_order_acquire) != self)
+        return false;
+    if (!p->frame_started)
+        return false;
+
+    // Only this owner can reach these non-atomic fields, and it still owns the
+    // mutex from start_frame. Clear the token before unlock so a new start on
+    // another thread cannot have its owner overwritten after acquiring it.
+    p->frame_started = false;
+    atomic_store_explicit(&p->abort_owner, 0, memory_order_release);
+    if (pl_mutex_unlock(&p->lock) != 0) {
+        p->frame_started = true;
+        atomic_store_explicit(&p->abort_owner, self, memory_order_release);
+        return false;
+    }
+    return true;
+}
+
 static bool gl_sw_submit_frame(pl_swapchain sw)
 {
     struct priv *p = PL_PRIV(sw);
@@ -217,6 +254,8 @@ static bool gl_sw_submit_frame(pl_swapchain sw)
     const gl_funcs *gl = &glctx->func;
     if (!gl_make_current(p->gl)) {
         p->frame_started = false;
+        if (p->params.diagnostic_abort_frame_no_gl)
+            atomic_store_explicit(&p->abort_owner, 0, memory_order_release);
         pl_mutex_unlock(&p->lock);
         return false;
     }
@@ -230,6 +269,8 @@ static bool gl_sw_submit_frame(pl_swapchain sw)
 
     gl->Flush();
     p->frame_started = false;
+    if (p->params.diagnostic_abort_frame_no_gl)
+        atomic_store_explicit(&p->abort_owner, 0, memory_order_release);
     bool ok = gl_check_err(sw->gpu, "gl_sw_submit_frame");
     gl_release_current(p->gl);
     pl_mutex_unlock(&p->lock);

@@ -29,6 +29,64 @@
 #define DRM_FORMAT_MOD_INVALID  ((UINT64_C(1) << 56) - 1)
 #endif
 
+struct pl_opengl_yuv_compare_quad_layout;
+
+// Optional explicit diagnostic attached to one special drawable wrapper.
+struct pl_yuv_compare {
+    pl_tex baseline;
+    pl_buf storage, storage_repeat, probe_storage;
+    unsigned int repetitions, words_per_pixel;
+    bool sample_tap, invariant_b, uv_oracle, uv_oracle_use_a, uv_oracle_probe, uv_oracle_single_pair;
+    bool quad_order, quad_order_reverse;
+    bool rejected; // repeated dispatch must fail before touching the drawable
+    int x, y, width, height;
+    bool (*checkpoint)(pl_gpu gpu, uint64_t *epoch);
+    bool (*prepare)(pl_gpu gpu, pl_tex target, int binding);
+    bool (*barrier)(pl_gpu gpu, pl_tex target, unsigned int pair);
+    void (*sources)(pl_gpu gpu, pl_tex target, const char *candidate,
+                    const char *baseline, const char *vertex);
+    void (*vertices)(pl_gpu gpu, pl_tex target, const char *candidate,
+                     const char *baseline, const char *uv_identifier);
+    void (*bodies)(pl_gpu gpu, pl_tex target, const char *original,
+                   const char *tap, uint64_t tap_hash);
+    bool (*quad_payloads)(pl_gpu gpu, pl_tex target, const uint8_t *baseline,
+        const uint8_t *candidate, const struct pl_opengl_yuv_compare_quad_layout *layout);
+    void (*record)(pl_gpu gpu, pl_tex target, unsigned int draw,
+                   pl_pass program, bool ok, uint64_t before, uint64_t after);
+    void (*finish)(pl_gpu gpu, pl_tex target, bool candidate_ok,
+                   bool baseline_ok, uint64_t shader_body_hash);
+};
+
+// Explicit one-frame ordinary RGB16F full-screen anchor. Never a UV cache.
+struct pl_opengl_uv_atlas_material;
+struct pl_uv_atlas_anchor {
+    pl_buf storage;
+    pl_pass companion; // owned by session, never changes the normal cached pass
+    int width, height;
+    bool rejected, ended;
+    const char *shader_body;
+    bool (*body)(pl_gpu, pl_tex, const char *body);
+    bool (*begin)(pl_gpu, pl_tex, const char *a0, const char *atlas, const char *vertex,
+                  const struct pl_opengl_yuv_compare_quad_layout *, const uint8_t *vertices);
+    bool (*checkpoint)(pl_gpu, pl_tex, uint64_t *epoch);
+    void (*record)(pl_gpu, pl_tex, unsigned int stage, pl_pass program,
+                   bool ok, uint64_t before, uint64_t after);
+    bool (*readback)(pl_gpu, pl_tex, unsigned int stage);
+    void (*finish)(pl_gpu, pl_tex, bool ok);
+    // Independent consumer diagnostic; ordinary anchor semantics stay intact.
+    bool reader;
+    unsigned int reader_reject;
+    pl_tex yuv_target;
+    pl_buf probe_storage;
+    pl_pass b0_pass;
+    bool (*material)(pl_gpu, pl_tex, const struct pl_opengl_uv_atlas_material *);
+    bool (*probe_readback)(pl_gpu, pl_tex, unsigned int mode);
+    bool (*input_identity)(pl_gpu, pl_tex, const void *texture);
+    // Archives the seeding pass's four corner UV values (float[8]) so the
+    // production consumer gate can compare the actual mapping numerics.
+    bool (*uv_corners)(pl_gpu, pl_tex, const float uv[8]);
+};
+
 // This struct must be the first member of the gpu's priv struct. The `pl_gpu`
 // helpers will cast the priv struct to this struct!
 
@@ -53,6 +111,10 @@ struct pl_gpu_fns {
     void (*pass_destroy)(pl_gpu, pl_pass);
     void (*timer_destroy)(pl_gpu, pl_timer);
 
+    // Optional backend output contract. NULL means ordinary texture output.
+    bool (*tex_rgb16f_to_yuv)(pl_gpu gpu, pl_tex tex);
+    struct pl_yuv_compare *(*tex_yuv_compare)(pl_gpu gpu, pl_tex tex);
+    struct pl_uv_atlas_anchor *(*tex_uv_atlas_anchor)(pl_gpu gpu, pl_tex tex);
     GPU_PFN(tex_create);
     GPU_PFN(tex_invalidate); // optional
     GPU_PFN(tex_clear_ex); // optional if no blittable formats
@@ -80,6 +142,24 @@ struct pl_gpu_fns {
 // All resources such as textures and buffers allocated from the GPU must be
 // destroyed before calling pl_destroy.
 void pl_gpu_destroy(pl_gpu gpu);
+
+static inline bool pl_tex_rgb16f_to_yuv(pl_gpu gpu, pl_tex tex)
+{
+    const struct pl_gpu_fns *impl = PL_PRIV(gpu);
+    return impl->tex_rgb16f_to_yuv && impl->tex_rgb16f_to_yuv(gpu, tex);
+}
+
+static inline struct pl_yuv_compare *pl_tex_yuv_compare(pl_gpu gpu, pl_tex tex)
+{
+    const struct pl_gpu_fns *impl = PL_PRIV(gpu);
+    return impl->tex_yuv_compare ? impl->tex_yuv_compare(gpu, tex) : NULL;
+}
+
+static inline struct pl_uv_atlas_anchor *pl_tex_uv_atlas_anchor(pl_gpu gpu, pl_tex tex)
+{
+    const struct pl_gpu_fns *impl = PL_PRIV(gpu);
+    return impl->tex_uv_atlas_anchor ? impl->tex_uv_atlas_anchor(gpu, tex) : NULL;
+}
 
 // Returns true if the device supports interop. This is considered to be
 // the case if at least one of `gpu->export/import_caps` is nonzero.

@@ -20,6 +20,9 @@
 #include "common.h"
 #include "formats.h"
 #include "utils.h"
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 #ifdef PL_HAVE_UNIX
 #include <unistd.h>
@@ -102,6 +105,60 @@ static inline size_t get_page_size(void)
         gl->GetIntegeri_v((pname), i, &tmp);\
         *(field) = tmp;                     \
     } while (0)
+
+// Diagnostic capability wiring only; do not change ordinary GLES limits.
+static bool gl_init_yuv_compare_caps(pl_gpu gpu, const struct pl_opengl_params *params)
+{
+    if (!params->diagnostic_yuv_compare_caps)
+        return false;
+    struct pl_gl *p = PL_PRIV(gpu);
+    const gl_funcs *gl = gl_funcs_get(gpu);
+    const char *reason = NULL;
+    if (p->gles_ver < 31 || gpu->glsl.version < 310)
+        reason = "gles-glsl-version";
+    else if (!params->egl_display || !params->egl_context ||
+             !eglGetCurrentDisplay || !eglGetCurrentContext || !eglGetCurrentSurface ||
+             eglGetCurrentDisplay() != params->egl_display ||
+             eglGetCurrentContext() != params->egl_context ||
+             eglGetCurrentSurface(EGL_DRAW) == EGL_NO_SURFACE ||
+             eglGetCurrentSurface(EGL_READ) == EGL_NO_SURFACE)
+        reason = "egl-owner";
+    else if (!gl->GetError || !gl->GetIntegerv || !gl->GetInteger64v || !gl->GetIntegeri_v ||
+             !gl->GenBuffers || !gl->BindBuffer || !gl->DeleteBuffers || !gl->BufferData ||
+             !gl->GetProgramResourceIndex || !gl->GetProgramResourceiv ||
+             !gl->BindBufferRange || !gl->BindBufferBase || !gl->MapBufferRange ||
+             !gl->UnmapBuffer || !gl->MemoryBarrier || !gl->FenceSync ||
+             !gl->ClientWaitSync || !gl->DeleteSync || !gl->Flush)
+        reason = "missing-capture-proc";
+    if (reason) {
+        PL_ERR(gpu, "MKS-YUV-COMPARE-LIB event=caps-rejected reason=%s", reason);
+        return false;
+    }
+    uint64_t before = p->error_epoch;
+    GLint64 max_ssbo = 0;
+    GLint blocks = 0, bindings = 0;
+    gl->GetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &max_ssbo);
+    gl->GetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &blocks);
+    gl->GetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &bindings);
+    bool clean = gl_check_err(gpu, "yuv_compare_caps");
+    if (!clean || p->error_epoch != before || max_ssbo <= 0 ||
+        (uint64_t) max_ssbo > SIZE_MAX || blocks < 1 || bindings < 1)
+    {
+        PL_ERR(gpu, "MKS-YUV-COMPARE-LIB event=caps-rejected reason=query"
+               " max_ssbo=%"PRId64" blocks=%d bindings=%d clean=%d"
+               " epoch_before=%"PRIu64" epoch_after=%"PRIu64,
+               (int64_t) max_ssbo, blocks, bindings, clean, before, p->error_epoch);
+        return false;
+    }
+    // Keep this private. Advertising SSBO globally would enable ordinary HDR
+    // peak-detection shaders and change the upstream renderer's frozen body.
+    p->yuv_compare_max_ssbo = (size_t) max_ssbo;
+    PL_ERR(gpu, "MKS-YUV-COMPARE-LIB event=caps-ready private_ssbo=%"PRId64
+           " renderer_max_buffer=%zu renderer_max_ssbo=%zu fragment_blocks=%d bindings=%d",
+           (int64_t) max_ssbo, gpu->limits.max_buf_size, gpu->limits.max_ssbo_size,
+           blocks, bindings);
+    return true;
+}
 
 pl_gpu pl_gpu_create_gl(pl_log log, pl_opengl pl_gl, const struct pl_opengl_params *params)
 {
@@ -225,6 +282,8 @@ pl_gpu pl_gpu_create_gl(pl_log log, pl_opengl pl_gl, const struct pl_opengl_para
     // Query import/export support
     p->egl_dpy = params->egl_display;
     p->egl_ctx = params->egl_context;
+    if (params->diagnostic_yuv_compare_caps)
+        p->yuv_compare_caps_ready = gl_init_yuv_compare_caps(gpu, params);
     p->has_egl_storage = pl_opengl_has_ext(p->gl, "GL_EXT_EGL_image_storage");
     p->has_egl_import = pl_opengl_has_ext(p->gl, "GL_OES_EGL_image_external");
     gpu->export_caps.tex = tex_handle_caps(gpu, false);
@@ -245,6 +304,39 @@ pl_gpu pl_gpu_create_gl(pl_log log, pl_opengl pl_gl, const struct pl_opengl_para
     p->has_invalidate_fb = gl_test_ext(gpu, "GL_ARB_invalidate_subdata", 43, 30);
     p->has_invalidate_tex = gl_test_ext(gpu, "GL_ARB_invalidate_subdata", 43, 0);
     p->has_queries = gl_test_ext(gpu, "GL_ARB_timer_query", 30, 0);
+#ifdef __ANDROID__
+    char timing[PROP_VALUE_MAX] = {0};
+    bool timing_enabled = __system_property_get("debug.mks.gpu_timing", timing) > 0 &&
+                          strcmp(timing, "render") == 0;
+    if (!strcmp(timing, "input") || !strcmp(timing, "yuv"))
+        p->has_queries = false;
+    if (timing_enabled && p->gles_ver &&
+        pl_opengl_has_ext(p->gl, "GL_EXT_disjoint_timer_query")) {
+        struct gl_ctx *ctx = PL_PRIV(p->gl);
+#define TIMER_LOAD(field, symbol) do { \
+    p->field = (void *) (params->get_proc_addr_ex \
+        ? params->get_proc_addr_ex(ctx->params.proc_ctx, symbol) \
+        : params->get_proc_addr ? params->get_proc_addr(symbol) : NULL); \
+} while (0)
+        TIMER_LOAD(timer_gen, "glGenQueriesEXT");
+        TIMER_LOAD(timer_delete, "glDeleteQueriesEXT");
+        TIMER_LOAD(timer_begin, "glBeginQueryEXT");
+        TIMER_LOAD(timer_end, "glEndQueryEXT");
+        TIMER_LOAD(timer_info, "glGetQueryivEXT");
+        TIMER_LOAD(timer_get, "glGetQueryObjectuivEXT");
+        TIMER_LOAD(timer_get64, "glGetQueryObjectui64vEXT");
+#undef TIMER_LOAD
+        p->ext_queries = p->timer_gen && p->timer_delete && p->timer_begin &&
+                         p->timer_end && p->timer_info && p->timer_get && p->timer_get64;
+        GLint counter_bits = 0;
+        if (p->ext_queries)
+            p->timer_info(GL_TIME_ELAPSED, 0x8864 /* GL_QUERY_COUNTER_BITS_EXT */,
+                          &counter_bits);
+        p->ext_queries &= counter_bits > 0;
+        p->has_queries |= p->ext_queries;
+        PL_INFO(gpu, "MKS-GPU-TIMER renderer EXT bridge enabled=%d", p->ext_queries);
+    }
+#endif
     p->has_storage = gl_test_ext(gpu, "GL_ARB_shader_image_load_store", 42, 31) &&
                      gl_test_ext(gpu, "GL_ARB_texture_storage", 42, 30);
     p->has_readback = true;
@@ -522,6 +614,7 @@ void gl_buf_copy(pl_gpu gpu, pl_buf dst, size_t dst_offset,
 
 struct pl_timer_t {
     GLuint query[QUERY_OBJECT_NUM];
+    uint64_t epoch[QUERY_OBJECT_NUM];
     int index_write; // next index to write to
     int index_read; // next index to read from
 };
@@ -534,7 +627,10 @@ static pl_timer gl_timer_create(pl_gpu gpu)
         return NULL;
 
     pl_timer timer = pl_zalloc_ptr(NULL, timer);
-    gl->GenQueries(QUERY_OBJECT_NUM, timer->query);
+    if (p->ext_queries)
+        p->timer_gen(QUERY_OBJECT_NUM, timer->query);
+    else
+        gl->GenQueries(QUERY_OBJECT_NUM, timer->query);
     RELEASE_CURRENT();
     return timer;
 }
@@ -547,7 +643,11 @@ static void gl_timer_destroy(pl_gpu gpu, pl_timer timer)
         return;
     }
 
-    gl->DeleteQueries(QUERY_OBJECT_NUM, timer->query);
+    struct pl_gl *p = PL_PRIV(gpu);
+    if (p->ext_queries)
+        p->timer_delete(QUERY_OBJECT_NUM, timer->query);
+    else
+        gl->DeleteQueries(QUERY_OBJECT_NUM, timer->query);
     gl_check_err(gpu, "gl_timer_destroy");
     RELEASE_CURRENT();
     pl_free(timer);
@@ -567,10 +667,27 @@ static uint64_t gl_timer_query(pl_gpu gpu, pl_timer timer)
     uint64_t res = 0;
     GLuint query = timer->query[timer->index_read];
     GLuint avail = 0;
-    gl->GetQueryObjectuiv(query, GL_QUERY_RESULT_AVAILABLE, &avail);
+    if (p->ext_queries) {
+        GLint disjoint = 0;
+        gl->GetIntegerv(0x8FBB /* GL_GPU_DISJOINT_EXT */, &disjoint);
+        if (disjoint) {
+            p->timer_epoch++;
+            p->timer_disjoint++;
+        }
+        if (timer->epoch[timer->index_read] != p->timer_epoch) {
+            timer->index_read = (timer->index_read + 1) % QUERY_OBJECT_NUM;
+            p->timer_dropped++;
+            goto done;
+        }
+        p->timer_get(query, GL_QUERY_RESULT_AVAILABLE, &avail);
+    } else {
+        gl->GetQueryObjectuiv(query, GL_QUERY_RESULT_AVAILABLE, &avail);
+    }
     if (!avail)
         goto done;
-    if (p->gles_ver || p->gl_ver < 33) {
+    if (p->ext_queries) {
+        p->timer_get64(query, GL_QUERY_RESULT, &res);
+    } else if (p->gles_ver || p->gl_ver < 33) {
         GLuint tmp = 0;
         gl->GetQueryObjectuiv(query, GL_QUERY_RESULT, &tmp);
         res = tmp;
@@ -578,10 +695,34 @@ static uint64_t gl_timer_query(pl_gpu gpu, pl_timer timer)
         gl->GetQueryObjectui64v(query, GL_QUERY_RESULT, &res);
     }
 
+    if (p->ext_queries) {
+        GLint disjoint = 0;
+        gl->GetIntegerv(0x8FBB /* GL_GPU_DISJOINT_EXT */, &disjoint);
+        if (disjoint) {
+            p->timer_epoch++;
+            p->timer_disjoint++;
+            p->timer_dropped++;
+            res = 0;
+        }
+    }
     timer->index_read = (timer->index_read + 1) % QUERY_OBJECT_NUM;
     // fall through
 
 done:
+    if (p->ext_queries) {
+        p->timer_resolved += res > 0;
+        pl_clock_t now = pl_clock_now();
+        if (!p->timer_report_time || pl_clock_diff(now, p->timer_report_time) >= 10) {
+            p->timer_report_time = now;
+            PL_ERR(gpu, "MKS-GPU-RENDER issued=%llu resolved=%llu disjoint=%llu "
+                   "dropped=%llu epoch=%llu",
+                   (unsigned long long) p->timer_issued,
+                   (unsigned long long) p->timer_resolved,
+                   (unsigned long long) p->timer_disjoint,
+                   (unsigned long long) p->timer_dropped,
+                   (unsigned long long) p->timer_epoch);
+        }
+    }
     RELEASE_CURRENT();
     return res;
 }
@@ -592,7 +733,20 @@ void gl_timer_begin(pl_gpu gpu, pl_timer timer)
         return;
 
     const gl_funcs *gl = gl_funcs_get(gpu);
-    gl->BeginQuery(GL_TIME_ELAPSED, timer->query[timer->index_write]);
+    struct pl_gl *p = PL_PRIV(gpu);
+    if (p->ext_queries) {
+        GLint disjoint = 0;
+        gl->GetIntegerv(0x8FBB /* GL_GPU_DISJOINT_EXT */, &disjoint);
+        if (disjoint) {
+            p->timer_epoch++;
+            p->timer_disjoint++;
+        }
+        timer->epoch[timer->index_write] = p->timer_epoch;
+        p->timer_issued++;
+        p->timer_begin(GL_TIME_ELAPSED, timer->query[timer->index_write]);
+    } else {
+        gl->BeginQuery(GL_TIME_ELAPSED, timer->query[timer->index_write]);
+    }
 }
 
 void gl_timer_end(pl_gpu gpu, pl_timer timer)
@@ -601,11 +755,17 @@ void gl_timer_end(pl_gpu gpu, pl_timer timer)
         return;
 
     const gl_funcs *gl = gl_funcs_get(gpu);
-    gl->EndQuery(GL_TIME_ELAPSED);
+    struct pl_gl *p = PL_PRIV(gpu);
+    if (p->ext_queries)
+        p->timer_end(GL_TIME_ELAPSED);
+    else
+        gl->EndQuery(GL_TIME_ELAPSED);
 
     timer->index_write = (timer->index_write + 1) % QUERY_OBJECT_NUM;
     if (timer->index_write == timer->index_read) {
         // forcibly drop the least recent result to make space
+        if (p->ext_queries)
+            p->timer_dropped++;
         timer->index_read = (timer->index_read + 1) % QUERY_OBJECT_NUM;
     }
 }
@@ -638,7 +798,17 @@ static bool gl_gpu_is_failed(pl_gpu gpu)
     return gl->failed;
 }
 
+static bool gl_tex_rgb16f_to_yuv(pl_gpu gpu, pl_tex tex)
+{
+    (void) gpu;
+    const struct pl_tex_gl *t = PL_PRIV(tex);
+    return t->rgb16f_to_yuv;
+}
+
 static const struct pl_gpu_fns pl_fns_gl = {
+    .tex_rgb16f_to_yuv       = gl_tex_rgb16f_to_yuv,
+    .tex_yuv_compare         = gl_tex_yuv_compare,
+    .tex_uv_atlas_anchor     = gl_tex_uv_atlas_anchor,
     .destroy                = gl_gpu_destroy,
     .tex_create             = gl_tex_create,
     .tex_destroy            = gl_tex_destroy,
