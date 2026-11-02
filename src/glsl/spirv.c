@@ -31,6 +31,21 @@ static const struct spirv_compiler *compilers[] = {
 
 pl_spirv pl_spirv_create(pl_log log, struct pl_spirv_version spirv_ver)
 {
+    pl_info(log, "creating SPIR-V compiler with requested versions: "
+            "SPIR-V %u.%u, Vulkan %u.%u",
+            spirv_ver.spv_version >> 16, (spirv_ver.spv_version >> 8) & 0xff,
+            spirv_ver.env_version >> 22, (spirv_ver.env_version >> 12) & 0x3ff);
+
+    const uint32_t max_spirv = PL_SPV_VERSION(1, 6);
+    const uint32_t max_vulkan = PL_VLK_VERSION(1, 3);
+    
+    if (spirv_ver.env_version > max_vulkan) {
+        pl_info(log, "requested vulkan version too high (> 1.3), clamping to maximum: "
+                "SPIR-V 1.6, vulkan 1.3");
+        spirv_ver.env_version = max_vulkan;
+        spirv_ver.spv_version = max_spirv;
+    }
+
     for (int i = 0; i < PL_ARRAY_SIZE(compilers); i++) {
         pl_spirv spirv = compilers[i]->create(log, spirv_ver);
         if (!spirv)

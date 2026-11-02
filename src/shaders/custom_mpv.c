@@ -1191,10 +1191,10 @@ static bool bind_pass_tex(pl_shader sh, pl_str name,
         GLSLH("#define HOOKED_pt %.*s_pt \n", PL_STR_FMT(name));
         GLSLH("#define HOOKED_map %.*s_map \n", PL_STR_FMT(name));
         GLSLH("#define HOOKED_mul %.*s_mul \n", PL_STR_FMT(name));
-        GLSLH("#define HOOKED_tex %.*s_tex \n", PL_STR_FMT(name));
-        GLSLH("#define HOOKED_texOff %.*s_texOff \n", PL_STR_FMT(name));
+        GLSLH("#define HOOKED_tex(pos) %.*s_tex(pos) \n", PL_STR_FMT(name));
+        GLSLH("#define HOOKED_texOff(off) %.*s_texOff(off) \n", PL_STR_FMT(name));
         if (can_gather)
-            GLSLH("#define HOOKED_gather %.*s_gather \n", PL_STR_FMT(name));
+            GLSLH("#define HOOKED_gather(pos, c) %.*s_gather(pos, c) \n", PL_STR_FMT(name));
     }
 
     if (mainpresub) {
@@ -1206,10 +1206,10 @@ static bool bind_pass_tex(pl_shader sh, pl_str name,
         GLSLH("#define MAIN_pt MAINPRESUB_pt \n");
         GLSLH("#define MAIN_map MAINPRESUB_map \n");
         GLSLH("#define MAIN_mul MAINPRESUB_mul \n");
-        GLSLH("#define MAIN_tex MAINPRESUB_tex \n");
-        GLSLH("#define MAIN_texOff MAINPRESUB_texOff \n");
+        GLSLH("#define MAIN_tex(pos) MAINPRESUB_tex(pos) \n");
+        GLSLH("#define MAIN_texOff(off) MAINPRESUB_texOff(off) \n");
         if (can_gather)
-            GLSLH("#define MAIN_gather MAINPRESUB_gather \n");
+            GLSLH("#define MAIN_gather(pos, c) MAINPRESUB_gather(pos, c) \n");
     }
 
     return true;
