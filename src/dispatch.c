@@ -874,6 +874,45 @@ struct pl_uv_atlas_table_params {
     ident_t words_ident;
 };
 
+// Unified sample-tap site admission (single source of truth for the
+// diagnostic compare substitution and the production UV table): exactly one
+// sampled texture, the tap's texture matching it with a normal 2D sampler
+// and a FLOAT/UNORM/SNORM format, and exactly one float vec2 UV varying.
+// Stricter is safer: a site failing any condition must never be rewritten.
+static pl_tex mks_tap_site_supported(pl_dispatch dp, pl_shader sh,
+                                     const struct pl_pass_params *params,
+                                     const struct mks_sample_tap_site *site)
+{
+    if (!(dp->gpu->glsl.gles && dp->gpu->glsl.version >= 310 &&
+          params->type == PL_PASS_RASTER))
+        return NULL;
+    unsigned int matching_tex = 0, matching_uv = 0, sampled_tex = 0;
+    pl_tex tap_tex = NULL;
+    for (int i = 0; i < sh->descs.num; i++) {
+        const struct pl_shader_desc *sd = &sh->descs.elem[i];
+        if (sd->desc.type != PL_DESC_SAMPLED_TEX)
+            continue;
+        sampled_tex++;
+        pl_tex tex = sd->binding.object;
+        if (sh_ident_unpack(sd->desc.name) == site->tex_id && tex &&
+            tex->sampler_type == PL_SAMPLER_NORMAL && tex->params.w > 0 &&
+            tex->params.h > 0 && !tex->params.d && tex->params.format &&
+            (tex->params.format->type == PL_FMT_FLOAT ||
+             tex->params.format->type == PL_FMT_UNORM ||
+             tex->params.format->type == PL_FMT_SNORM)) {
+            matching_tex++;
+            tap_tex = tex;
+        }
+    }
+    for (int i = 0; i < sh->vas.num; i++) {
+        const struct pl_vertex_attrib *va = &sh->vas.elem[i].attr;
+        if (sh_ident_unpack(va->name) == site->uv_id && va->fmt &&
+            va->fmt->type == PL_FMT_FLOAT && va->fmt->num_components == 2 &&
+            va->fmt->glsl_type && !strcmp(va->fmt->glsl_type, "vec2"))
+            matching_uv++;
+    }
+    return sampled_tex == 1 && matching_tex == 1 && matching_uv == 1 ? tap_tex : NULL;
+}
 static struct pass *finalize_pass(pl_dispatch dp, pl_shader sh,
                                   pl_tex target, int vert_idx,
                                   const struct pl_blend_params *blend, bool load,
@@ -1062,7 +1101,8 @@ static struct pass *finalize_pass(pl_dispatch dp, pl_shader sh,
     if (compare && compare->uv_oracle_probe)
         pass->compare_probe_binding = binding[pl_desc_namespace(dp->gpu, PL_DESC_BUF_STORAGE)];
 
-    // Finalize the shader and look it up in the pass cache
+    
+// Finalize the shader and look it up in the pass cache
     pl_str_builder vert_builder = NULL, glsl_builder = NULL;
     // Finalize upstream exactly once; both variants use this immutable body.
     gen_params.shader_body = sh_finalize_internal(sh);
@@ -1079,34 +1119,9 @@ static struct pass *finalize_pass(pl_dispatch dp, pl_shader sh,
         pl_str body = pl_str_builder_exec(gen_params.shader_body);
         char *original = pl_strdup0(tmp, body);
         struct mks_sample_tap_site site;
-        bool supported = dp->gpu->glsl.gles && dp->gpu->glsl.version >= 310 &&
-                         params.type == PL_PASS_RASTER && mks_sample_tap_find(original, &site);
-        unsigned int matching_tex = 0, matching_uv = 0, sampled_tex = 0;
-        if (supported) {
-            for (int i = 0; i < sh->descs.num; i++) {
-                const struct pl_shader_desc *sd = &sh->descs.elem[i];
-                if (sd->desc.type != PL_DESC_SAMPLED_TEX)
-                    continue;
-                sampled_tex++;
-                pl_tex tex = sd->binding.object;
-                if (sh_ident_unpack(sd->desc.name) == site.tex_id && tex &&
-                    tex->sampler_type == PL_SAMPLER_NORMAL && tex->params.w > 0 &&
-                    tex->params.h > 0 && !tex->params.d && tex->params.format &&
-                    (tex->params.format->type == PL_FMT_FLOAT ||
-                     tex->params.format->type == PL_FMT_UNORM ||
-                     tex->params.format->type == PL_FMT_SNORM))
-                    matching_tex++;
-            }
-            for (int i = 0; i < sh->vas.num; i++) {
-                const struct pl_vertex_attrib *va = &sh->vas.elem[i].attr;
-                if (sh_ident_unpack(va->name) == site.uv_id && va->fmt &&
-                    va->fmt->type == PL_FMT_FLOAT && va->fmt->num_components == 2 &&
-                    va->fmt->glsl_type && !strcmp(va->fmt->glsl_type, "vec2"))
-                    matching_uv++;
-            }
-        }
-        char *tap = supported && sampled_tex == 1 && matching_tex == 1 && matching_uv == 1
-                    ? mks_sample_tap_instrument(original, &site) : NULL;
+        bool supported = mks_sample_tap_find(original, &site) &&
+                         mks_tap_site_supported(dp, sh, &params, &site);
+        char *tap = supported ? mks_sample_tap_instrument(original, &site) : NULL;
         if (!tap) {
             PL_ERR(dp, "MKS-YUV-COMPARE-LIB event=sample-tap-rejected reason=site-not-unique-or-supported");
             goto error;
@@ -1147,31 +1162,9 @@ static struct pass *finalize_pass(pl_dispatch dp, pl_shader sh,
         pl_str body = pl_str_builder_exec(gen_params.shader_body);
         char *original = pl_strdup0(tmp, body);
         struct mks_sample_tap_site site;
-        bool supported = dp->gpu->glsl.gles && dp->gpu->glsl.version >= 310 &&
-            params.type == PL_PASS_RASTER && mks_sample_tap_find(original, &site);
-        unsigned int matching_tex = 0, matching_uv = 0;
-        pl_tex tap_tex = NULL;
-        if (supported) {
-            for (int i = 0; i < sh->descs.num; i++) {
-                const struct pl_shader_desc *sd = &sh->descs.elem[i];
-                if (sd->desc.type != PL_DESC_SAMPLED_TEX)
-                    continue;
-                pl_tex tex = sd->binding.object;
-                if (sh_ident_unpack(sd->desc.name) == site.tex_id && tex &&
-                    tex->sampler_type == PL_SAMPLER_NORMAL && !tex->params.d &&
-                    tex->params.w > 0 && tex->params.h > 0) {
-                    matching_tex++;
-                    tap_tex = tex;
-                }
-            }
-            for (int i = 0; i < sh->vas.num; i++) {
-                const struct pl_vertex_attrib *va = &sh->vas.elem[i].attr;
-                if (sh_ident_unpack(va->name) == site.uv_id && va->fmt &&
-                    va->fmt->type == PL_FMT_FLOAT && va->fmt->num_components == 2)
-                    matching_uv++;
-            }
-        }
-        if (!supported || matching_tex != 1 || matching_uv != 1) {
+        bool supported = mks_sample_tap_find(original, &site);
+        pl_tex tap_tex = supported ? mks_tap_site_supported(dp, sh, &params, &site) : NULL;
+        if (!tap_tex) {
             PL_ERR(dp->gpu, "MKS-FUSION-TABLE event=table-required-unmet reason=tap-not-unique");
             goto error;
         }
