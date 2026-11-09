@@ -65,6 +65,7 @@ struct pl_gl {
     bool has_invalidate_tex;
     bool has_vao;
     bool has_queries;
+    bool mks_timers_disabled;
     // Android opt-in EXT timer bridge; never enabled by default.
     bool ext_queries;
     uint64_t timer_epoch;

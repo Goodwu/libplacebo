@@ -303,14 +303,23 @@ pl_gpu pl_gpu_create_gl(pl_log log, pl_opengl pl_gl, const struct pl_opengl_para
     p->has_vao = gl_test_ext(gpu, "GL_ARB_vertex_array_object", 30, 30);
     p->has_invalidate_fb = gl_test_ext(gpu, "GL_ARB_invalidate_subdata", 43, 30);
     p->has_invalidate_tex = gl_test_ext(gpu, "GL_ARB_invalidate_subdata", 43, 0);
-    p->has_queries = gl_test_ext(gpu, "GL_ARB_timer_query", 30, 0);
+    // M2' frame-timing owner disable: checked before any property read or
+    // extension bridge so the owner is the sole elapsed-query user.
+    bool mks_timers_disabled = params->mks_disable_timers;
+    p->mks_timers_disabled = mks_timers_disabled;
+    p->has_queries = mks_timers_disabled ? false
+                   : gl_test_ext(gpu, "GL_ARB_timer_query", 30, 0);
 #ifdef __ANDROID__
     char timing[PROP_VALUE_MAX] = {0};
-    bool timing_enabled = __system_property_get("debug.mks.gpu_timing", timing) > 0 &&
+    bool timing_enabled = !mks_timers_disabled &&
+                          __system_property_get("debug.mks.gpu_timing", timing) > 0 &&
                           strcmp(timing, "render") == 0;
-    if (!strcmp(timing, "input") || !strcmp(timing, "yuv"))
+    if (!mks_timers_disabled &&
+        (!strcmp(timing, "input") || !strcmp(timing, "yuv")))
         p->has_queries = false;
-    if (timing_enabled && p->gles_ver &&
+    if (mks_timers_disabled)
+        PL_ERR(gpu, "MKS-GPU-TIMER renderer disabled-by-owner=1");
+    else if (timing_enabled && p->gles_ver &&
         pl_opengl_has_ext(p->gl, "GL_EXT_disjoint_timer_query")) {
         struct gl_ctx *ctx = PL_PRIV(p->gl);
 #define TIMER_LOAD(field, symbol) do { \
@@ -623,6 +632,8 @@ static pl_timer gl_timer_create(pl_gpu gpu)
 {
     const gl_funcs *gl = gl_funcs_get(gpu);
     struct pl_gl *p = PL_PRIV(gpu);
+    if (p->mks_timers_disabled)
+        return NULL;
     if (!p->has_queries || !MAKE_CURRENT())
         return NULL;
 

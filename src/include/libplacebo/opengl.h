@@ -102,8 +102,14 @@ struct pl_opengl_params {
     // an error-free query. The measured limit is private to fixed capture
     // buffers; renderer-visible limits and shader planning remain unchanged.
     bool diagnostic_yuv_compare_caps;
+    // M2' frame-timing owner: disable every internal GL timer path so the
+    // frame-timing owner is the only elapsed-query user in this context.
+    // Requires PL_HAVE_MKS_DISABLE_TIMERS on the mpv side; without the macro
+    // the field is ignored and the owner must refuse to arm.
+    bool mks_disable_timers;
 };
 #define PL_HAVE_MKS_YUV_COMPARE_CAPS 1
+#define PL_HAVE_MKS_DISABLE_TIMERS 1
 
 // Default/recommended parameters
 #define pl_opengl_params(...) (&(struct pl_opengl_params) { __VA_ARGS__ })
